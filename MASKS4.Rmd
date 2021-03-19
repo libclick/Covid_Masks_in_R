@@ -1,0 +1,470 @@
+---
+title: "Covid-19 and Masks"
+author: "Elizabeth Click"
+date: "12/19/2020"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r}
+#getwd()
+```
+
+```{r}
+#install.packages("cdlTools") for FIPS numbers
+library(tidyverse)
+library(lubridate)
+library(cdlTools)
+library(BSDA)
+```
+
+#### Question: Does mask use affect rate of cases or rate of deaths due to covid?
+
+#### H_null: probability of new covid cases and deaths is not associated with mask usage, i.e. p_highcompliance = p_lowcompliance for new cases and new deaths.
+#### H_alpha: probability of covid cases and deaths is associated with mask usage, i.e. p_highcompliance is not equal to p_lowcompliance
+
+##### Alpha is set at 0.05.
+
+Data Used: Dynata, T. N. (2020, July). Estimates from The New York Times, based on roughly 250,000 interviews conducted by Dynata from July 2 to July 14. Retrieved from https://github.com: https://github.com/nytimes/covid-19-data/tree/master/mask-use;
+
+Thomas Hale, S. W. (2020). https://github.com. Retrieved from Oxford COVID-19 Government Response Tracker. Blavatnik School of Government.: https://github.com/OxCGRT/covid-policy-
+
+```{r}
+maskuse <- read_csv("C:/Users/libcl/OneDrive/Documents/DATA110/NYTimesMaskWearing.csv")
+census2019 <- read.csv("C:/Users/libcl/OneDrive/Documents/DATA110/Co_est_census_2019.csv")
+covid <- read_csv("C:/Users/libcl/OneDrive/Documents/OxfordData11_30.csv")
+
+```
+
+
+#### Maskuse Dataset: clean and translate fips code to add variable for state name. Then select countypop2019 in census dataset to create totals for each state, so we can join with Maskuse dataset to do a weighted average of each states' mask data
+```{r}
+#clean maskuse and census datasets
+#change column heading to lower case
+names(maskuse) <- tolower(names(maskuse))
+names(census2019) <- tolower(names(census2019))
+#drop last 3 digits of countyfp to get state fip
+x <- as.integer(maskuse$countyfp)
+statefp <- floor(x/1000) 
+#convert state fips code to state name 
+maskuse <- maskuse %>% 
+  mutate(regionname = fips(statefp, to="Name"))
+#write.csv(maskuse, "C:/Users/libcl/OneDrive/Documents/MyNYTimesMaskUseSurvey.csv", row.names = FALSE)
+
+
+#select population estimate for 2019 to be able to join by FIPS code
+census2019 <- census2019 %>% 
+  summarize(stname, countyfp = state*1000 + county, state, county, popestimate2019)
+#join by FIPS code
+masks <- maskuse %>% left_join(census2019, by = "countyfp")
+#write.csv(census2019, "C:/Users/libcl/OneDrive/Documents/MyCensus2019CountyFIPS.csv", row.names = FALSE)
+
+
+#clean covid dataset
+#change column heading to lower case
+names(covid) <- tolower(names(covid))
+#replace . with _ in column headings
+names(covid) <- gsub(".","_",names(covid), fixed = TRUE)
+names(covid) <- gsub(" ","_",names(covid), fixed = TRUE)
+
+#write.csv(covid, "C:/Users/libcl/OneDrive/Documents/MyOxfordUSCovid.csv", row.names = FALSE)
+
+```
+
+
+#### Manipulate masks dataset to show by state rather than county to be able to join with Covid-10 data later. Weight by population from U.S. Census 2018 data into new variables st_never, st_. .... , st_always. Then sum using 0-100 scale of these new variables to get a county "score"
+
+```{r}
+#sum masks column by state into new column, state_pop 
+#mutate weighted county average of compliance categories into st_* new names
+
+masks <- masks %>% 
+  group_by(regionname) %>% 
+  mutate(state_pop = sum(popestimate2019))
+  
+masks <- masks %>% 
+  group_by(regionname) %>% 
+  mutate(st_never = never*popestimate2019/state_pop, st_rarely = rarely*popestimate2019/state_pop, st_sometimes = sometimes*popestimate2019/state_pop, st_frequently = frequently*popestimate2019/state_pop, st_always = always*popestimate2019/state_pop)
+
+# get a county score to use instead of 5 categories; give it a 100 index score to average for each state in the next chunk. 0*rarely, 25*rarely, 50*sometimes, 70*frequently, 100*always. then add across to score each county
+
+masks <- masks %>% 
+  group_by(regionname) %>% 
+  mutate(score = 0*never + 25*rarely + 50*sometimes + 75*frequently + 100*always)
+summary(masks)
+```
+#### Finally, we can use our county score to get a state score stored in new variable st_score
+
+```{r}
+# get state score by summing county score then dividing by number of counties for each state
+masks <- masks %>% 
+  group_by(regionname) %>% 
+  summarize(regionname, st_score = sum(score)/n())
+
+```
+
+#### View quartiles with boxplot
+
+```{r}
+#In later analysis we should filter regionname into 2 groups:st_score >= 82.29 and st_score <= 67.05 for 1st quartile and 3rd quartile from summary above and boxplot below for clearer mask compliance demarcation between states
+p1 <- boxplot(masks$st_score)
+```
+
+#### Prepare to join covid dataset by first manipulating what columns and new variables we will need. 
+
+```{r}
+#state only population data
+population <- read_csv("C:/Users/libcl/OneDrive/Documents/DATA110/populationUSstates.csv")
+
+#clean data
+names(population) <- tolower(names(population))
+names(population) <- gsub(".","_",names(population), fixed = TRUE)
+names(population) <- gsub(" ","_",names(population), fixed = TRUE)
+
+#write.csv(covid, "C:/Users/libcl/OneDrive/Documents/MyPopulation2018State.csv", row.names = FALSE)
+```
+
+#### Need to join population data to get comparisons of newdeaths and newcases per 100 by joining the covid and population datasets
+
+```{r}
+head(covid)
+covid1 <- covid %>%
+  select(countryname, countrycode, regionname, date, confirmedcases, confirmeddeaths,  containmenthealthindexfordisplay,  economicsupportindexfordisplay)
+head(covid1)
+covidpop <- right_join(covid1, population, 
+              by = c("regionname" = "state"))
+```
+
+#### Need to remove Puerto Rico and DC as data is not reported. Add new variable lub_date using lubridate package to transform date variable into class "date". Then use lag on existing cumulative variables to add newcases and newdeaths variables which will give daily new cases and deaths added each day.
+
+```{r}
+covidpop <- covidpop %>% 
+  filter(!is.na(countrycode)) %>%   #remove puerto rico and dc and data not reported
+  group_by(regionname) %>% 
+#add new variable lub_date of class date, and compute new cases and deaths.
+    mutate(lub_date = ymd(date), newcases = confirmedcases - lag(confirmedcases), newdeaths = confirmeddeaths - lag(confirmeddeaths))
+```
+
+#### Get a rate per 100 people for newcases and newdeaths
+
+```{r}
+#use pop2018 to get a rate of for new cases and new deaths per 100 people
+covidpop <- covidpop %>% #first drop calculated NAs
+  drop_na(newcases)
+covidpop <- covidpop %>% 
+  drop_na(newdeaths)
+  
+covidpop <- covidpop %>% 
+  filter(pop2018 != 0) %>% 
+    group_by(regionname) %>%
+  summarize(regionname, lub_date, containmenthealthindexfordisplay, economicsupportindexfordisplay, confirmedcases, confirmeddeaths, newcases, newdeaths, pop2018, newcases_rate = newcases*100/pop2018, newdeaths_rate = newdeaths*100/pop2018)
+```
+
+#### set up data for binary variable of success and failure for newcases and newdeaths
+
+```{r}
+covidpop <- covidpop %>%
+  mutate(status_cases = if_else(confirmedcases > lag(confirmedcases), "failure", "success"), status_deaths = if_else(confirmeddeaths > lag(confirmeddeaths), "failure", "success"))
+```
+
+#### Initial look at variables by date: does not appear to have a linear relationship. R^2 indicates only 3% of y is explained by x. This is not surprising as the virus tracking has been described as exponential in growth rate, although it appears it may be approximately normal from histograms, although highly skewed to the left.
+
+```{r}
+ covidpop %>% 
+  ggplot() +
+  geom_boxplot(aes(x = newcases_rate)) +
+  xlab("New Case Rate (per 100 people)") +
+  ggtitle("New Covid Cases") +
+  coord_flip()
+
+
+covidpop %>%
+  ggplot() +
+  geom_boxplot(aes(x = newdeaths_rate)) +
+  xlab("Death Rate (per 100 people)") +
+  ggtitle("New Covid Deaths") +
+  coord_flip()
+ 
+covidpop %>%
+  ggplot() +
+  geom_histogram(aes(x = newcases_rate)) +
+  xlab("New Case Rate (per 100 people)") +
+  ggtitle("New Covid Cases")
+  
+covidpop %>%
+  ggplot() +
+  geom_histogram(aes(x = newdeaths_rate)) +
+  xlab("New Death Rate (per 100 people)") +
+  ggtitle("New Covid Deaths")
+
+covidpop %>%
+  ggplot() +
+  geom_point(aes(x = lub_date, y = newcases_rate, alpha = 0.05)) +
+  xlab("Date") +
+  ylab("New Cases Rate (per 100 people)") +
+  ggtitle("New Covid Cases")
+
+covidpop %>%
+  ggplot() +
+  geom_point(aes(x = lub_date, y = newdeaths_rate, alpha = 0.05)) +
+  xlab("Date") +
+  ylab("New Death Rate (per 100 people)") +
+  ggtitle("New Covid Deaths")
+fit_cases <- lm(newcases_rate~lub_date, data = covidpop)
+fit_deaths <- lm(newdeaths_rate~lub_date, data = covidpop)
+summary(fit_cases)
+summary(fit_deaths)
+qqplot(covidpop$lub_date, covidpop$newcases_rate)
+qqplot(covidpop$lub_date, covidpop$newdeaths_rate)
+```
+
+#### Sub-conclusion: the new cases do not appear to be linear to the dates in the times series whereas the deaths may be from the scatterplot; but  normality is questionable because of the highly skewed histograms, as well as the the shape of the qqplots; logistical regression may be attempted after analysis of the mask data survey if desired.
+
+
+##### Because we are trying to determine if masks affect the rate of infection and death, we are essentially looking at 2 treatments (level of mask wearing) and comparing to see if there is other than random difference that occurs between the 2 treatments.  We need to see that our observational population pool consists of the entire population of the United States. Assumptions are that  beginning in June 2020 when New York was better through the initial wave and states began to ease off shutdowns and other extreme measures, so the period studied is June 1 thru November 30, 2020. Mask wearing was more commonly recommended beginning in April, so by June, should be settled behavior. Further, the survey (dataset) is a sampling of the whole U.S. population which was done by the New York Times at the beginning of July, and this analysis is assuming steady rates of compliance throughout. There may be bias associated with survey answers especially on this highly politicized issue: 1) The New York times name may influence answers 2) People may lie "never" to "own the lib's" or "always" as wishful thinking of our compliance to signal virtues and belief in scientists' suggestions. The composition of the categories are not clear demarcations, so we have to assume for purposes of this analysis that they are roughly accurate reporting. To assist in measuring the two treatments clearly, consideration will be given only to those states who score below the 1st quartile as one group and those who score above the 3rd quartile in the second. 
+
+#### Join datasets, and reduce data set to dates starting from 6/1/2020
+
+```{r}
+#join covid and mask datasets
+covidmasks <- covidpop %>% right_join(masks, by = "regionname")
+
+#look at data only from 6/1/2000 forward
+covidmasks <- covidmasks %>% 
+  group_by(regionname) %>% 
+  filter(lub_date >= "2020-06-01")
+#write.csv(covid, "C:/Users/libcl/OneDrive/Documents/MyJoinedUSCovidMaskUse.csv", row.names = FALSE)
+
+```
+
+
+
+#### Add new variable set to binary 0 or 1 for in 1st(never) or 4th(always) quartile of state score, respectively. 
+
+```{r}
+covidmasks <- covidmasks %>%
+  mutate(comply_quartile = if_else(st_score <= 67.05, 0,
+                                   if_else(st_score >= 82.29, 1, 99)))
+```
+
+#### It might be interesting to look at covid data by individual states to see what is happening. I will filter for 7 states that are representative of several regions of the U.S. to reduce the size of the dataset 
+
+```{r}
+
+covidrep7 <- covidmasks %>% 
+  filter((regionname == "New York" | regionname == "Maryland" | regionname == "Florida"  | regionname == "California" | regionname == "North Dakota" | regionname == "Iowa" | regionname == "Arizona" & !is.na(confirmedcases))) 
+  
+summary(covidrep7)
+#We now have 17052 rows, and 45 columns of data
+view(covidrep7)
+```
+#  Before digging into the mask part of the data, I look at general scatterplot for newcases by regionname using log2 for newcase rate and newdeaths rate to see if I can get a linear relationship using log2. It appears a logrithmic linear model would work, but since this is not our primary question, I elected not to run coefficients and summaries for prediction for this study. There is valuable information in seeing the slope of the lines for cases or deaths in individual states. There are some hints that political drama may be correlated with that slope.
+
+```{r}
+p10 <- covidrep7 %>%
+  group_by(regionname) %>% 
+  summarize(regionname, lub_date, newcases_ratelog = log2(newcases_rate)) %>% 
+  ggplot() +
+  geom_point(aes(x = lub_date, y = newcases_ratelog)) +
+  geom_smooth(aes(x = lub_date, y = newcases_ratelog), method = lm, se = FALSE, color = "red") +
+  ggtitle("New Cases Rate by Individual State") +
+  xlab("Date") +
+  ylab("New Cases Rate(Log)") +
+  facet_wrap(regionname~.)
+p10
+```
+
+```{r}
+p11 <- covidrep7 %>%
+  group_by(regionname) %>% 
+  summarize(regionname, lub_date, newdeaths_ratelog = log2(newdeaths_rate)) %>% 
+  ggplot() +
+  geom_point(aes(x = lub_date, y = newdeaths_ratelog)) +
+  geom_smooth(aes(x = lub_date, y = newdeaths_ratelog), method = lm, se = FALSE, color = "red") +
+  ggtitle("New Deaths Rate by Individual State") +
+  xlab("Date") +
+  ylab("New Deaths Rate(Log)") +
+  facet_wrap(regionname~.)
+p11
+```
+
+
+#### Look at linear regression model again with this final form of dataset containing only the two treatment groups
+
+```{r}
+#This shows fit1 has 25% r-sq on the dataset reduced by date and mask compliance of never or alwys; this suggests there may be a difference in low compliance and high compliance; we may have to look at multiple regression using lub_date, *_rate, and categorical of low or high compliance if we decide to produce a model to predict rate upon mask usage of never or always.
+
+fit1 <- lm(newcases_rate ~ lub_date, data = covidmasks)
+summary(fit1)
+
+qqplot(covidmasks$lub_date, covidmasks$newcases_rate)
+```
+
+#### Scatterplot for the two groups is as follows with color: light blue for compliance = always; dark blue for non-compliance = never. This also hints there may be something happening with level of mask wearing specifically
+```{r}
+
+```
+
+```{r}
+p1 <- covidmasks %>% 
+   filter(comply_quartile != 99) %>%
+  ggplot() +
+  geom_point(aes(x = lub_date, y = newcases_rate, color = comply_quartile)) +
+xlab("Date") +
+ylab("New Case Rate(per 100 people)") +
+ggtitle("New Cases for Never vs. Always Masks")
+
+p2 <- covidmasks %>% 
+  filter(comply_quartile != 99) %>% 
+  ggplot() +
+  geom_point(aes(x = lub_date, y = newdeaths_rate, color = comply_quartile)) + 
+  xlab("Date") +
+  ylab("New Death Rate(per 100 people)") +
+  ggtitle("New Deaths for Never vs. Always Masks")
+
+
+p1
+p2
+```
+##### compare newcases_rate and newdeaths_rate following these implementations
+
+```{r}
+p3 <- covidrep7 %>% 
+  group_by(regionname) %>% 
+  summarize(regionname, lub_date, date_lag = lag(lub_date, 28), newcases_rate, st_score) %>% 
+  ggplot() +
+  geom_point(aes(x = date_lag, y = newcases_rate, color = st_score)) + scale_color_viridis_c(name = "State Score") +
+  facet_wrap(regionname~.) +
+  ggtitle("State New Cases")
+p3
+
+p4 <- covidrep7 %>% 
+  group_by(regionname) %>% 
+  summarize(regionname, lub_date, date_lag = lag(lub_date, 28), newdeaths_rate, st_score) %>% 
+  ggplot() +
+  geom_point(aes(x = date_lag, y = newdeaths_rate, color = st_score)) + scale_color_viridis_c(name = "State Score") +
+  facet_wrap(regionname~.) +
+  ggtitle("State New Deaths")
+p4
+```
+
+
+#### Let's look at the 4 plots of the 2 categories of compliance with in both cases and deaths
+
+```{r}
+covidmasks %>% 
+  filter(comply_quartile == 1) %>% 
+  ggplot() +
+  geom_histogram(aes(x = newcases_rate), binwidth = .01) +
+  ggtitle("New Cases - Always Wears Mask") +
+  xlab("Rate per 100 people")
+
+
+
+covidmasks %>% 
+  filter(comply_quartile == 0) %>% 
+  ggplot() +
+  geom_histogram(aes(x = newcases_rate), binwidth = .01) +
+  ggtitle("New Cases - Never Wears Mask") +
+  xlab("Rate per 100 people")
+  
+
+covidmasks %>% 
+  filter(comply_quartile == 1) %>% 
+  ggplot() +
+  geom_histogram(aes(x = newdeaths_rate), binwidth = .0001) +
+  ggtitle("New Deaths - Always Wears Mask") +
+  xlab("Rate per 100 people")
+
+covidmasks %>% 
+  filter(comply_quartile == 0) %>% 
+  ggplot() +
+  geom_histogram(aes(x = newdeaths_rate), binwidth = .0001) +
+  ggtitle("New Deaths - Never Wears Mask") +
+  xlab("Rate per 100 people")
+```
+
+#### The t-test does not seem appropriate because of the large skew; we can try a chisquare for association of treatment type(low compliance in mask wearing and high compliance in mask wearing) with a 2 way table and success defined as no daily increase in cases or deaths as follows:
+                Always Masks      Never Masks
+Success         count success     count success
+Failure         count failure     count failure
+
+#### Compute the values for the Chi-Square test for independence in R to enter into the 2-way tables.
+
+```{r}
+#count Success and Failure for third quartile always new cases
+covidmasks %>% 
+  filter(comply_quartile == 1) %>%
+  group_by(status_cases) %>% 
+  summarize(n())
+```
+
+```{r}
+#compute Success and Failure for first quartile never new cases
+covidmasks %>% 
+  filter(comply_quartile == 0) %>%
+  group_by(status_cases) %>% 
+  summarize(n())
+
+```
+
+
+```{r}
+#compute Success and Failure for third quartile always new deaths
+covidmasks %>% 
+  filter(comply_quartile == 1) %>%
+  group_by(status_deaths) %>% 
+  summarize(n())
+
+```
+
+```{r}
+#compute Success and Failure for first quartile never deaths
+covidmasks %>% 
+  filter(comply_quartile == 0) %>%
+  group_by(status_deaths) %>% 
+  summarize(n())
+
+```
+
+#### Perform Chi-square for independence in cases using chunk counts above 
+
+```{r}
+success <- c(1345, 1522)
+failure <- c(97475, 148172)
+compliance <- data.frame(success, failure)
+chisq.test(compliance)
+# returns p = 4.244xe-15 < 0.05; very strong evidence of independence
+```
+
+#### Perform Chi-square for independence in deaths
+
+```{r}
+success <- c(6835, 30411)
+failure <- c(91985, 119283)
+compliance <- data.frame(success, failure)
+chisq.test(compliance)
+# returns p = .022e-16 < 0.05; very strong evidence of independence 
+```
+
+#### Given that the two groups above may not be normally distributed from the histograms and are independent according the Chi-Square test, the non-parametric wilcox.test in R will be used for hypothesis testing. First break into 2 datasets 'always' and 'never' to perform Wilcoxan, Mann, Whitney test to determine if the distributions coincide or if one is shifted significantly away from the other.
+
+```{r}
+covidalways <- covidmasks %>% 
+  filter(comply_quartile == 1)
+
+covidnever <- covidmasks %>% 
+  filter(comply_quartile == 0)
+
+
+# The non-parametric Wilcoxin test shows we  reject the null
+wilcox.test(covidnever$newcases_rate, covidalways$newcases_rate)
+wilcox.test(covidnever$newdeaths_rate, covidalways$newdeaths_rate)
+```
+
+### CONCLUSION:
+
+#### Wilcoxin test and Chi-Square test for independence are satisfied, so there is strong evidence that the distribution of mask wearing population and non-mask wearing population show significant shift from each other - we reject the null. Looking at the color scatterplots earlier for each group, it very strongly suggests that mask wearing may lower the rate of covid cases and deaths.
+
